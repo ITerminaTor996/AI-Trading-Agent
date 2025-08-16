@@ -44,15 +44,29 @@ class DataAgent:
 
             # --- 计算技术指标 ---
             print("正在计算技术指标...")
-            # 确保传递给ta库的是1D的Series
             close_prices = df["Close"].squeeze()
-            
+            high_prices = df["High"].squeeze()
+            low_prices = df["Low"].squeeze()
+
+            # 原有指标
             df["MA20"] = ta.trend.sma_indicator(close_prices, window=20, fillna=True)
             df["RSI14"] = ta.momentum.rsi(close_prices, window=14, fillna=True)
             macd = ta.trend.MACD(close_prices, window_fast=12, window_slow=26, window_sign=9, fillna=True)
             df["MACD"] = macd.macd()
             df["MACD_signal"] = macd.macd_signal()
-            
+
+            # 新增指标
+            # 布林带
+            bollinger = ta.volatility.BollingerBands(close_prices, window=20, window_dev=2, fillna=True)
+            df["Bollinger_High"] = bollinger.bollinger_hband()
+            df["Bollinger_Low"] = bollinger.bollinger_lband()
+            # 随机振荡器
+            stoch = ta.momentum.StochasticOscillator(high_prices, low_prices, close_prices, window=14, smooth_window=3, fillna=True)
+            df["Stoch_K"] = stoch.stoch()
+            df["Stoch_D"] = stoch.stoch_signal()
+            # 平均真实范围 (ATR)
+            df["ATR"] = ta.volatility.average_true_range(high_prices, low_prices, close_prices, window=14, fillna=True)
+
             self.data = df.tail(60) # 仅保留最近60天的数据用于分析
             print(f"数据加载和技术指标计算成功，共 {len(self.data)} 条记录。")
         except Exception as e:
@@ -111,6 +125,11 @@ class DataAgent:
                 f" 14日RSI：{get_formatted_value(row.get('RSI14', 'N/A'))}。"
                 f" MACD：{get_formatted_value(row.get('MACD', 'N/A'))}。"
                 f" MACD信号线：{get_formatted_value(row.get('MACD_signal', 'N/A'))}。"
+                f" 布林带上轨：{get_formatted_value(row.get('Bollinger_High', 'N/A'))}。"
+                f" 布林带下轨：{get_formatted_value(row.get('Bollinger_Low', 'N/A'))}。"
+                f" 随机指标K线：{get_formatted_value(row.get('Stoch_K', 'N/A'))}。"
+                f" 随机指标D线：{get_formatted_value(row.get('Stoch_D', 'N/A'))}。"
+                f" 平均真实范围ATR：{get_formatted_value(row.get('ATR', 'N/A'))}。"
             )
             example_texts.append(text)
         
