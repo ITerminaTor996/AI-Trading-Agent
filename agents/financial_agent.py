@@ -3,25 +3,26 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 import yfinance as yf
 import asyncio
+from .base_agent import BaseAgent
 
-class FinancialAgent:
+class FinancialAgent(BaseAgent):
     """
     负责获取和处理公司的基本面财务数据。
     """
     def __init__(self):
-        print("FinancialAgent 初始化成功。")
+        super().__init__(name="基本面分析Agent")
 
     def _get_financial_summary_sync(self, ticker: str) -> dict:
         """
         同步方法：获取指定股票的财务摘要信息。
         """
         try:
-            print(f"正在从yfinance获取 {ticker} 的财务摘要...")
+            print(f"[{self.name}] 正在从yfinance获取 {ticker} 的财务摘要...")
             stock = yf.Ticker(ticker)
             # .info返回一个包含大量信息的字典
             return stock.info
         except Exception as e:
-            print(f"错误：获取 {ticker} 的财务摘要时发生异常: {e}")
+            print(f"[{self.name}] 错误：获取 {ticker} 的财务摘要时发生异常: {e}")
             return {}
 
     async def get_financial_summary(self, ticker: str) -> dict:

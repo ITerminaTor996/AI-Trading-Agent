@@ -5,8 +5,9 @@ import pandas as pd
 import yfinance as yf
 import ta
 import asyncio
+from .base_agent import BaseAgent
 
-class DataAgent:
+class DataAgent(BaseAgent):
     """
     负责处理和转换金融数据，为LLM提供文本格式的输入。
     """
@@ -16,6 +17,7 @@ class DataAgent:
 
         :param ticker: 股票代码 (例如: 'AAPL', 'MSFT')。
         """
+        super().__init__(name="数据处理Agent")
         self.ticker = ticker.upper()
         self.data = None
 
@@ -24,11 +26,11 @@ class DataAgent:
         同步方法：从yfinance加载指定股票代码的K线数据，并计算技术指标。
         """
         try:
-            print(f"正在从yfinance加载 {self.ticker} 的数据...")
+            print(f"[{self.name}] 正在从yfinance加载 {self.ticker} 的数据...")
             # 增加数据周期到100天，为技术指标计算提供更充足的数据
             df = yf.download(self.ticker, period="100d", auto_adjust=True)
             if df.empty:
-                print(f"错误：未能从yfinance加载 {self.ticker} 的数据，DataFrame为空。")
+                print(f"[{self.name}] 错误：未能从yfinance加载 {self.ticker} 的数据，DataFrame为空。")
                 self.data = pd.DataFrame()
                 return self.data
 
@@ -43,7 +45,7 @@ class DataAgent:
             }, inplace=True)
 
             # --- 计算技术指标 ---
-            print("正在计算技术指标...")
+            print(f"[{self.name}] 正在计算技术指标...")
             close_prices = df["Close"].squeeze()
             high_prices = df["High"].squeeze()
             low_prices = df["Low"].squeeze()
@@ -68,9 +70,9 @@ class DataAgent:
             df["ATR"] = ta.volatility.average_true_range(high_prices, low_prices, close_prices, window=14, fillna=True)
 
             self.data = df.tail(60) # 仅保留最近60天的数据用于分析
-            print(f"数据加载和技术指标计算成功，共 {len(self.data)} 条记录。")
+            print(f"[{self.name}] 数据加载和技术指标计算成功，共 {len(self.data)} 条记录。")
         except Exception as e:
-            print(f"错误：加载或处理 {self.ticker} 数据时发生异常: {e}")
+            print(f"[{self.name}] 错误：加载或处理 {self.ticker} 数据时发生异常: {e}")
             self.data = pd.DataFrame()
         return self.data
 
@@ -98,7 +100,6 @@ class DataAgent:
                 except ValueError:
                     return 'N/A'
             
-            # 如果值是字符串 (例如 'N/A')，直接返回
             if isinstance(val, str):
                 return val
             if pd.isna(val): return 'N/A' # Handle NaN/NaT
@@ -120,7 +121,6 @@ class DataAgent:
                 f"最低价：{get_formatted_value(row['Low'])}，"
                 f"收盘价：{get_formatted_value(row['Close'])}，"
                 f"成交量：{get_formatted_value(row['Volume'], is_int=True)}。"
-                # 添加技术指标
                 f" 20日均线：{get_formatted_value(row.get('MA20', 'N/A'))}。"
                 f" 14日RSI：{get_formatted_value(row.get('RSI14', 'N/A'))}。"
                 f" MACD：{get_formatted_value(row.get('MACD', 'N/A'))}。"
@@ -142,10 +142,8 @@ async def main_test():
     df = await data_agent.load_data()
 
     if df is not None and not df.empty:
-        # 选择最近5条数据作为示例
         sample_df = df.tail(5)
         
-        # 转换数据为文本
         text_description = data_agent.kline_to_text(sample_df)
         
         print("\n--- K线数据转文本示例 ---")

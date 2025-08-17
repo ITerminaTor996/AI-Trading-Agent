@@ -4,23 +4,23 @@ sys.stdout.reconfigure(encoding='utf-8')
 import datetime
 import requests
 import re # 导入re模块用于正则表达式
-import os
 import asyncio
+from .base_agent import BaseAgent
 
-class NewsAgent:
+class NewsAgent(BaseAgent):
     """
     负责获取和处理新闻数据，为LLM提供文本格式的输入。
     """
-    def __init__(self):
+    def __init__(self, api_key: str):
         """
         初始化NewsAgent。
-        API密钥将从环境变量 NEWS_API_KEY 中读取。
+        :param api_key: NewsAPI.org的API密钥。
         """
-        self.api_key = os.getenv("NEWS_API_KEY")
-        if not self.api_key:
-            raise ValueError("错误：NEWS_API_KEY 环境变量未设置。")
+        super().__init__(name="新闻舆情Agent")
+        if not api_key:
+            raise ValueError("错误：NEWS_API_KEY 未提供。")
+        self.api_key = api_key
         self.base_url = "https://newsapi.org/v2/everything"
-        print("NewsAgent 初始化成功。")
 
     def _fetch_news_sync(self, query: str, page_size: int = 5) -> list[dict]:
         """
@@ -30,7 +30,7 @@ class NewsAgent:
         :param page_size: 获取的新闻数量。
         :return: 新闻文章列表，每篇文章是一个字典。
         """
-        print(f"正在从NewsAPI.org获取关于 \"{query}\" 的新闻...")
+        print(f"[{self.name}] 正在从NewsAPI.org获取关于 \"{query}\" 的新闻...")
         params = {
             'q': query, # 搜索关键词
             'language': 'en', # 语言：英文
@@ -57,10 +57,10 @@ class NewsAgent:
                     })
             return articles
         except requests.exceptions.RequestException as e:
-            print(f"错误：从NewsAPI.org获取新闻失败: {e}")
+            print(f"[{self.name}] 错误：从NewsAPI.org获取新闻失败: {e}")
             return []
         except Exception as e:
-            print(f"错误：处理NewsAPI响应时发生异常: {e}")
+            print(f"[{self.name}] 错误：处理NewsAPI响应时发生异常: {e}")
             return []
 
     async def fetch_news(self, query: str, page_size: int = 5) -> list[dict]:
@@ -79,9 +79,13 @@ class NewsAgent:
             content = news.get("content", "无内容")
             
             # 清理内容：移除HTML标签和[+XXXX chars]标记
-            content = re.sub(r'<[^>]+>', '', content) # 移除HTML标签
-            content = re.sub(r'\[\+\d+ chars\]', '', content) # 移除[+XXXX chars]标记，修正正则表达式
-            content = content.strip()
+            try:
+                content = re.sub(r'<[^>]+>', '', content) # 移除HTML标签
+                content = re.sub(r'\[\+\d+ chars\]', '', content) # 移除[+XXXX chars]标记
+                content = content.strip()
+            except Exception as e:
+                print(f"[{self.name}] 清理新闻内容时发生错误: {e}")
+                content = title # 如果内容清理失败，至少使用标题作为内容
 
             # 确保publish_time是datetime对象
             publish_time = news.get("publish_time", "未知时间")
@@ -95,26 +99,29 @@ class NewsAgent:
 
 # 示例用法 (用于测试)
 async def main_test():
-    from dotenv import load_dotenv
-    # For standalone testing, load environment variables from .env file
-    load_dotenv()
+    import os
+    import sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import app_config
 
     try:
-        # 初始化时会自动从环境变量加载API Key
-        news_agent = NewsAgent()
+        news_agent = NewsAgent(api_key=app_config.NEWS_API_KEY)
         
-        print("\n--- 新闻数据转文本示例 ---")
-        print("注意：此测试需要您已在环境中设置 NEWS_API_KEY。")
-        # 测试获取Apple Inc.的新闻
+        print(f"\n--- {news_agent.name} 测试 ---")
+        if not app_config.NEWS_API_KEY:
+            print("警告: NEWS_API_KEY 未在 app_config.py 或 .env 文件中设置，测试将失败。")
+
         news_data = await news_agent.fetch_news(query="Apple Inc.")
         news_text = news_agent.news_to_text(news_data)
         print(news_text)
         
     except ValueError as ve:
         print(ve)
+    except ImportError:
+        print("错误：无法导入app_config模块。请确保 `app_config.py` 文件在项目根目录，")
+        print("并且你正在从项目根目录运行此脚本，或者已经将项目根目录添加到了PYTHONPATH。")
     except Exception as e:
         print(f"发生错误: {e}")
 
 if __name__ == '__main__':
-    import asyncio
     asyncio.run(main_test())

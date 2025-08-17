@@ -1,7 +1,8 @@
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
+from .base_agent import BaseAgent
 
-class RiskAgent:
+class RiskAgent(BaseAgent):
     """
     负责根据预设规则（如止盈止损）对投资组合进行风险管理。
     """
@@ -12,6 +13,7 @@ class RiskAgent:
         :param stop_loss_pct: 止损百分比 (例如, 0.05 表示 5%的亏损).
         :param take_profit_pct: 止盈百分比 (例如, 0.10 表示 10%的盈利).
         """
+        super().__init__(name="风险管理Agent")
         if not 0 < stop_loss_pct < 1:
             raise ValueError("止损百分比必须在0和1之间。")
         if not 0 < take_profit_pct < 1:
@@ -19,7 +21,7 @@ class RiskAgent:
             
         self.stop_loss_pct = stop_loss_pct
         self.take_profit_pct = take_profit_pct
-        print(f"RiskAgent 初始化成功，止损线: {self.stop_loss_pct:.2%}, 止盈线: {self.take_profit_pct:.2%}")
+        print(f"[{self.name}] 止损线: {self.stop_loss_pct:.2%}, 止盈线: {self.take_profit_pct:.2%}")
 
     def check_risk(self, current_price: float, average_buy_price: float, current_shares: int) -> dict | None:
         """
@@ -61,7 +63,7 @@ if __name__ == '__main__':
 
     # 1. 初始化Agent
     risk_agent = RiskAgent(stop_loss_pct=STOP_LOSS, take_profit_pct=TAKE_PROFIT)
-    print("\n--- RiskAgent 测试开始 ---\n")
+    print(f"\n--- {risk_agent.name} 测试开始 ---\n")
 
     # 2. 模拟场景
     scenarios = {

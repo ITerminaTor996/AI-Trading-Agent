@@ -2,20 +2,20 @@ import sys
 sys.stdout.reconfigure(encoding='utf-8')
 
 import pandas as pd
+import numpy as np
 import asyncio
 import yfinance as yf
 import ta
-from dotenv import load_dotenv
+from tqdm import tqdm
+
+# 导入Agent和配置
 from agents.data_agent import DataAgent
 from agents.decision_agent import DecisionAgent
 from agents.news_agent import NewsAgent
 from agents.risk_agent import RiskAgent
-from agents.financial_agent import FinancialAgent # 导入FinancialAgent
+from agents.financial_agent import FinancialAgent
 from prompts.prompt_templates import PromptTemplates
-from tqdm import tqdm
-
-# Load environment variables from .env file
-load_dotenv()
+import app_config
 
 # --- 辅助函数 ---
 def calculate_price_change(df_slice: pd.DataFrame) -> float:
@@ -49,7 +49,7 @@ def find_similar_examples(
 
 class Portfolio:
     """
-    一个更完善的投资组合模拟器，能追踪持仓的平均成本。
+    一个更完善的投资组合模拟器，能追踪持仓的平均成本和历史表现。
     """
     def __init__(self, initial_capital=10000.0, commission_rate=0.001):
         self.initial_capital = initial_capital
@@ -57,6 +57,8 @@ class Portfolio:
         self.commission_rate = commission_rate
         self.holdings = {}
         self.trades = []
+        self.history = [] # 新增：记录每日资产净值
+        self.closed_trades = [] # 新增：记录已平仓的交易
 
     def get_value(self, current_prices: dict) -> float:
         stock_value = 0.0
@@ -64,24 +66,25 @@ class Portfolio:
             stock_value += data["shares"] * current_prices.get(ticker, 0)
         return self.cash + stock_value
 
-    def execute_trade(self, ticker: str, price: float, decision_result: dict):
+    def record_daily_value(self, date, current_prices: dict):
+        """在每个交易日末记录投资组合的总价值"""
+        value = self.get_value(current_prices)
+        self.history.append({'date': date, 'value': value})
+
+    def execute_trade(self, ticker: str, price: float, decision_result: dict, date):
         decision = decision_result.get('decision', '持有')
         trade_percent = decision_result.get('trade_percent', 0.0)
-        
         trade_percent = max(0.0, min(1.0, trade_percent))
-        
         position = self.holdings.get(ticker)
 
         if decision == "买入" and trade_percent > 0:
             investment_amount = self.cash * trade_percent
             shares_to_buy = int(investment_amount / price)
-            
             if shares_to_buy > 0:
                 trade_cost = shares_to_buy * price
                 commission = trade_cost * self.commission_rate
                 if self.cash >= trade_cost + commission:
                     self.cash -= (trade_cost + commission)
-                    
                     if position:
                         old_shares = position["shares"]
                         old_avg_price = position["average_buy_price"]
@@ -91,25 +94,75 @@ class Portfolio:
                         position["average_buy_price"] = new_avg_price
                     else:
                         self.holdings[ticker] = {"shares": shares_to_buy, "average_buy_price": price}
-                    
-                    self.trades.append({"date": pd.Timestamp.now(), "type": "BUY", "price": price, "shares": shares_to_buy, "commission": commission})
+                    self.trades.append({"date": date, "type": "BUY", "price": price, "shares": shares_to_buy, "commission": commission})
 
         elif decision == "卖出" and position and trade_percent > 0:
             shares_to_sell = int(position["shares"] * trade_percent)
-            
             if shares_to_sell > 0:
-                trade_cost = shares_to_sell * price
-                commission = trade_cost * self.commission_rate
-                
-                self.cash += (trade_cost - commission)
+                avg_buy_price = position["average_buy_price"]
+                proceeds = shares_to_sell * price
+                commission = proceeds * self.commission_rate
+                self.cash += (proceeds - commission)
                 position["shares"] -= shares_to_sell
+                
+                # 记录平仓交易的盈亏
+                profit = (price - avg_buy_price) * shares_to_sell - commission
+                self.closed_trades.append({'profit': profit, 'profit_pct': (price / avg_buy_price) - 1})
 
                 if position["shares"] <= 0:
                     del self.holdings[ticker]
-                
-                self.trades.append({"date": pd.Timestamp.now(), "type": "SELL", "price": price, "shares": shares_to_sell, "commission": commission})
+                self.trades.append({"date": date, "type": "SELL", "price": price, "shares": shares_to_sell, "commission": commission})
 
-async def run_backtest(ticker: str, days_to_backtest: int, initial_capital: float, risk_preference: str, news_fetch_interval: int, commission_rate: float, stop_loss_pct: float, take_profit_pct: float):
+def calculate_metrics(portfolio: Portfolio, risk_free_rate: float = 0.0) -> dict:
+    """计算并返回关键绩效指标 (KPIs)"""
+    if not portfolio.history or len(portfolio.history) < 2:
+        return {
+            "sharpe_ratio": 0.0,
+            "max_drawdown": 0.0,
+            "win_rate": 0.0
+        }
+    
+    history_df = pd.DataFrame(portfolio.history)
+    history_df['date'] = pd.to_datetime(history_df['date'])
+    history_df.set_index('date', inplace=True)
+    
+    # 1. 夏普比率
+    daily_returns = history_df['value'].pct_change().dropna()
+    if daily_returns.std() > 0:
+        # 年化夏普比率 (假设252个交易日)
+        sharpe_ratio = (daily_returns.mean() - risk_free_rate / 252) / daily_returns.std() * np.sqrt(252)
+    else:
+        sharpe_ratio = 0.0
+
+    # 2. 最大回撤
+    cumulative_returns = (1 + daily_returns).cumprod()
+    peak = cumulative_returns.expanding(min_periods=1).max()
+    drawdown = (cumulative_returns - peak) / peak
+    max_drawdown = drawdown.min()
+
+    # 3. 胜率
+    if not portfolio.closed_trades:
+        win_rate = 0.0
+    else:
+        wins = sum(1 for trade in portfolio.closed_trades if trade['profit'] > 0)
+        win_rate = wins / len(portfolio.closed_trades)
+
+    return {
+        "sharpe_ratio": sharpe_ratio,
+        "max_drawdown": max_drawdown,
+        "win_rate": win_rate
+    }
+
+async def run_backtest(conf: dict):
+    ticker = conf["ticker"]
+    days_to_backtest = conf["days_to_backtest"]
+    initial_capital = conf["initial_capital"]
+    risk_preference = conf["risk_preference"]
+    commission_rate = conf["commission_rate"]
+    news_fetch_interval = conf["news_fetch_interval"]
+    stop_loss_pct = conf["stop_loss_pct"]
+    take_profit_pct = conf["take_profit_pct"]
+
     print(f"--- 开始对 {ticker} 进行回测 ---")
     print(f"回测周期: 最近 {days_to_backtest} 个交易日")
     print(f"初始资金: ${initial_capital:,.2f}")
@@ -121,13 +174,13 @@ async def run_backtest(ticker: str, days_to_backtest: int, initial_capital: floa
     print("----------------------------------")
 
     try:
-        decision_agent = DecisionAgent()
-        news_agent = NewsAgent()
+        decision_agent = DecisionAgent(api_key=app_config.DEEPSEEK_API_KEY, model_name=app_config.DEEPSEEK_MODEL_NAME, base_url=app_config.DEEPSEEK_BASE_URL)
+        news_agent = NewsAgent(api_key=app_config.NEWS_API_KEY)
         data_agent_for_text = DataAgent(ticker)
         risk_agent = RiskAgent(stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct)
-        financial_agent = FinancialAgent() # 初始化FinancialAgent
+        financial_agent = FinancialAgent()
     except ValueError as e:
-        print(e)
+        print(f"Agent初始化失败: {e}")
         return
 
     portfolio = Portfolio(initial_capital, commission_rate)
@@ -136,9 +189,9 @@ async def run_backtest(ticker: str, days_to_backtest: int, initial_capital: floa
     print(f"正在加载最近 {data_load_days} 天的历史数据...")
     full_historical_data = yf.download(ticker, period=f"{data_load_days}d", auto_adjust=True, progress=False)
     if full_historical_data.empty or len(full_historical_data) < data_load_days - 5:
-        print("错误：无法加载足够的回测数据。")
+        print("错误：无法加载足够的回测数据。" )
         return
-    print("历史数据加载完成。")
+    print("历史数据加载完成。" )
     full_historical_data.reset_index(inplace=True)
 
     print("正在为历史数据计算技术指标...")
@@ -157,20 +210,20 @@ async def run_backtest(ticker: str, days_to_backtest: int, initial_capital: floa
     full_historical_data["Stoch_K"] = stoch.stoch()
     full_historical_data["Stoch_D"] = stoch.stoch_signal()
     full_historical_data["ATR"] = ta.volatility.average_true_range(high_prices, low_prices, close_prices, window=14, fillna=True)
-    print("技术指标计算完成。")
+    print("技术指标计算完成。" )
 
-    # 在回测开始前，获取一次财务摘要
     financial_summary_data = await financial_agent.get_financial_summary(ticker)
     financial_summary_text = financial_agent.summary_to_text(financial_summary_data)
 
     backtest_start_index = 60
     backtest_range = range(backtest_start_index, len(full_historical_data))
-    
+    latest_news_text = ""
+
     print("\n--- 开始每日回测循环 ---")
     for i in tqdm(range(len(backtest_range)), desc="回测进度"):
         loop_index = backtest_start_index + i
+        current_date = full_historical_data['Date'].iloc[loop_index]
         current_price = full_historical_data['Close'].iloc[loop_index].item()
-        date_str = full_historical_data['Date'].iloc[loop_index].strftime('%Y-%m-%d')
         
         position = portfolio.holdings.get(ticker)
         if position:
@@ -178,8 +231,9 @@ async def run_backtest(ticker: str, days_to_backtest: int, initial_capital: floa
             if risk_decision:
                 shares_to_sell = risk_decision["shares_to_sell"]
                 sell_percent = shares_to_sell / position["shares"] if position["shares"] > 0 else 0
-                portfolio.execute_trade(ticker, current_price, {"decision": "卖出", "trade_percent": sell_percent})
-                tqdm.write(f"日期: {date_str} | 决策: 卖出   | 原因: {risk_decision['reason']:<12} | 价格: ${current_price:7.2f} | 总资产: ${portfolio.get_value({ticker: current_price}):9,.2f}")
+                portfolio.execute_trade(ticker, current_price, {"decision": "卖出", "trade_percent": sell_percent}, current_date)
+                tqdm.write(f"日期: {current_date.strftime('%Y-%m-%d')} | 决策: 卖出 (风控) | ...")
+                portfolio.record_daily_value(current_date, {ticker: current_price})
                 continue
 
         if i % news_fetch_interval == 0:
@@ -197,81 +251,64 @@ async def run_backtest(ticker: str, days_to_backtest: int, initial_capital: floa
 
         examples_text = ""
         for j, ex_df in enumerate(found_examples):
-            examples_text += f"\n--- 历史示例 {j+1} ---\n"
+            examples_text += f"\n--- 历史示例 {j+1} ---"
             examples_text += data_agent_for_text.kline_to_text(ex_df)
 
         current_data_text = data_agent_for_text.kline_to_text(current_kline_data)
 
         current_shares_before_trade = position['shares'] if position else 0
-        if current_shares_before_trade > 0:
-            portfolio_status = f"当前持有 {current_shares_before_trade} 股 {ticker}。"
-        else:
-            portfolio_status = "当前无持仓。"
+        portfolio_status = f"当前持有 {current_shares_before_trade} 股 {ticker}。" if current_shares_before_trade > 0 else "当前无持仓。"
 
         full_prompt = PromptTemplates.trading_decision_prompt(
-            examples=examples_text,
-            current_data=current_data_text,
-            portfolio_status=portfolio_status,
-            risk_preference=risk_preference,
-            news_text=latest_news_text,
-            financial_summary_text=financial_summary_text # 传递财务摘要
+            examples=examples_text, current_data=current_data_text, portfolio_status=portfolio_status,
+            risk_preference=risk_preference, news_text=latest_news_text, financial_summary_text=financial_summary_text
         )
 
         decision_result = await asyncio.to_thread(decision_agent.generate_decision, full_prompt)
-        portfolio.execute_trade(ticker, current_price, decision_result)
+        portfolio.execute_trade(ticker, current_price, decision_result, current_date)
+        
+        portfolio.record_daily_value(current_date, {ticker: current_price})
 
-        current_portfolio_value = portfolio.get_value({ticker: current_price})
         decision = decision_result.get('decision', '持有')
         trade_percent = decision_result.get('trade_percent', 0.0) * 100
-        
-        tqdm.write(f"日期: {date_str} | 决策: {decision:<4} | 仓位%: {trade_percent:<3.0f}% | 持仓: {current_shares_before_trade:<4} | 价格: ${current_price:7.2f} | 总资产: ${current_portfolio_value:9,.2f}")
+        current_portfolio_value = portfolio.get_value({ticker: current_price})
+        tqdm.write(f"日期: {current_date.strftime('%Y-%m-%d')} | 决策: {decision:<4} | 仓位%: {trade_percent:<3.0f}% | 持仓: {current_shares_before_trade:<4} | 价格: ${current_price:7.2f} | 总资产: ${current_portfolio_value:9,.2f}")
 
     print("\n--- 回测结束 --- 正在生成报告 ---", flush=True)
     final_price = full_historical_data['Close'].iloc[-1].item()
     final_value = portfolio.get_value({ticker: final_price})
     total_return_pct = (final_value - initial_capital) / initial_capital * 100
+    
     buy_and_hold_start_price = full_historical_data['Close'].iloc[backtest_start_index].item()
-    buy_and_hold_shares = initial_capital / buy_and_hold_start_price
-    buy_and_hold_final_value = buy_and_hold_shares * final_price
+    buy_and_hold_final_value = (initial_capital / buy_and_hold_start_price) * final_price
     buy_and_hold_return_pct = (buy_and_hold_final_value - initial_capital) / initial_capital * 100
+
+    metrics = calculate_metrics(portfolio)
+
     print("\n--- 回测结果报告 ---", flush=True)
     print(f"股票代码: {ticker}", flush=True)
-    print(f"回测时段: {full_historical_data['Date'].iloc[backtest_start_index].strftime('%Y-%m-%d')} to {full_historical_data['Date'].iloc[-1].strftime('%Y-%m-%d')}", flush=True)
+    print(f"回测时段: {portfolio.history[0]['date'].strftime('%Y-%m-%d')} to {portfolio.history[-1]['date'].strftime('%Y-%m-%d')}", flush=True)
     print("----------------------------------", flush=True)
     print("AI 策略表现:", flush=True)
     print(f"  初始资本: ${initial_capital:,.2f}", flush=True)
     print(f"  最终资产: ${final_value:,.2f}", flush=True)
     print(f"  总收益率: {total_return_pct:.2f}%", flush=True)
     print(f"  交易次数: {len(portfolio.trades)}", flush=True)
+    print(f"  胜率: {metrics.get('win_rate', 0):.2%}", flush=True)
+    print(f"  夏普比率: {metrics.get('sharpe_ratio', 0):.2f}", flush=True)
+    print(f"  最大回撤: {metrics.get('max_drawdown', 0):.2%}", flush=True)
     print("----------------------------------", flush=True)
     print("买入并持有策略表现:", flush=True)
-    print(f"  初始资本: ${initial_capital:,.2f}", flush=True)
     print(f"  最终资产: ${buy_and_hold_final_value:,.2f}", flush=True)
     print(f"  总收益率: {buy_and_hold_return_pct:.2f}%", flush=True)
     print("----------------------------------", flush=True)
 
+async def main():
+    """主函数，从配置加载并运行回测"""
+    print("开始执行回测...")
+    await run_backtest(app_config.BACKTEST_CONFIG)
+    print("回测执行完毕。" )
+
 if __name__ == '__main__':
-    # --- 回测配置 ---
-    TICKER = "AAPL"
-    DAYS_TO_BACKTEST = 1
-    INITIAL_CAPITAL = 10000.0
-    RISK_PREFERENCE = "稳健"
-    COMMISSION_RATE = 0.001
-    NEWS_FETCH_INTERVAL = 5
-    STOP_LOSS_PCT = 0.05
-    TAKE_PROFIT_PCT = 0.10
-
-    asyncio.run(
-        run_backtest(
-            TICKER, 
-            DAYS_TO_BACKTEST, 
-            INITIAL_CAPITAL, 
-            RISK_PREFERENCE, 
-            NEWS_FETCH_INTERVAL, 
-            COMMISSION_RATE, 
-            STOP_LOSS_PCT, 
-            TAKE_PROFIT_PCT
-        )
-    )
-
+    asyncio.run(main())
     input("\n按任意键退出...")

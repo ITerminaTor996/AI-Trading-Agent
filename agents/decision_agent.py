@@ -1,32 +1,32 @@
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
 
-import os
 import json
 from openai import OpenAI # 导入OpenAI库，用于调用DeepSeek API
+from .base_agent import BaseAgent
 
-class DecisionAgent:
+class DecisionAgent(BaseAgent):
     """
     负责与大型语言模型交互，根据Prompt生成交易决策。
     """
-    def __init__(self, model_name: str = 'deepseek-chat', base_url: str = "https://api.deepseek.com"):
+    def __init__(self, api_key: str, model_name: str, base_url: str):
         """
         初始化DecisionAgent。
-        API密钥将从环境变量 DEEPSEEK_API_KEY 中读取。
 
-        :param model_name: 要使用的DeepSeek模型名称（例如: 'deepseek-chat'）。
-        :param base_url: DeepSeek API的基础URL。
+        :param api_key: 用于API调用的密钥。
+        :param model_name: 要使用的模型名称。
+        :param base_url: API的基础URL。
         """
-        api_key = os.getenv("DEEPSEEK_API_KEY")
+        super().__init__(name="AI决策Agent")
         if not api_key:
-            raise ValueError("错误：DEEPSEEK_API_KEY 环境变量未设置。")
+            raise ValueError("错误：API密钥未提供。")
 
         self.client = OpenAI(
             api_key=api_key,
             base_url=base_url
         )
         self.model_name = model_name
-        print(f"DecisionAgent 初始化成功，使用模型: {model_name}, Base URL: {base_url}")
+        print(f"[{self.name}] 使用模型: {model_name}, Base URL: {base_url}")
 
     def generate_decision(self, prompt: str) -> dict:
         """
@@ -55,17 +55,18 @@ class DecisionAgent:
             decision = json.loads(response_text)
             return decision
         except Exception as e:
-            print(f"调用LLM或解析响应时发生错误: {e}")
-            print(f"LLM原始响应: {response_text if 'response_text' in locals() else 'N/A'}")
+            print(f"[{self.name}] 调用LLM或解析响应时发生错误: {e}")
+            response_text = locals().get('response_text', 'N/A')
+            print(f"[{self.name}] LLM原始响应: {response_text}")
             return {"decision": "错误", "reason": f"LLM调用失败或响应解析错误: {e}", "confidence": 0.0}
 
 # 示例用法 (用于测试)
 if __name__ == '__main__':
-    from dotenv import load_dotenv
-    # For standalone testing, load environment variables from .env file
-    load_dotenv()
+    import os
+    import sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import app_config
 
-    # 模拟一个Prompt
     mock_prompt = """
 你是一个专业的金融交易员。根据以下数据做出交易决策：
 
@@ -87,15 +88,23 @@ if __name__ == '__main__':
 """
 
     try:
-        # 初始化时会自动从环境变量加载API Key
-        decision_agent = DecisionAgent(model_name='deepseek-chat')
+        decision_agent = DecisionAgent(
+            api_key=app_config.DEEPSEEK_API_KEY,
+            model_name=app_config.DEEPSEEK_MODEL_NAME,
+            base_url=app_config.DEEPSEEK_BASE_URL
+        )
         
-        print("\n--- 模拟LLM调用测试 ---")
-        print("注意：此测试需要您已在环境中设置 DEEPSEEK_API_KEY。")
+        print(f"\n--- {decision_agent.name} 模拟LLM调用测试 ---")
+        if not app_config.DEEPSEEK_API_KEY:
+            print("警告: DEEPSEEK_API_KEY 未在 app_config.py 或 .env 文件中设置，测试将失败。")
+        
         decision = decision_agent.generate_decision(mock_prompt)
         print("LLM决策:", decision)
 
     except ValueError as ve:
         print(ve)
+    except ImportError:
+        print("错误：无法导入app_config模块。请确保 `app_config.py` 文件在项目根目录，")
+        print("并且你正在从项目根目录运行此脚本，或者已经将项目根目录添加到了PYTHONPATH。")
     except Exception as e:
         print(f"发生错误: {e}")
